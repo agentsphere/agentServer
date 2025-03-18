@@ -1,5 +1,5 @@
-
 import asyncio
+
 import datetime
 import os
 from typing import Dict, List, Optional
@@ -131,7 +131,6 @@ logging.basicConfig(
 PORT = int(os.getenv("PORT",8031))  # Define a default port
 
 async def run():
-    """Runs FastAPI server properly inside an async event loop"""
     config = uvicorn.Config(app, host="127.0.0.1", port=PORT, loop="asyncio")
     server = uvicorn.Server(config)
 
@@ -145,7 +144,5 @@ if __name__ == "__main__":
         asyncio.run(run())
     except KeyboardInterrupt:
         logging.info("Server shutdown requested. Exiting cleanly.")
-
-
 
 
