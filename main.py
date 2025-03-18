@@ -8,8 +8,12 @@ from fastapi import Depends, FastAPI, Request, HTTPException,status
 from pydantic import BaseModel
 import httpx
 import logging
+logger = logging.getLogger(__name__)
 
+from dotenv import load_dotenv
 
+# Load variables from .env file
+load_dotenv()
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s - %(levelname)s - %(message)s"
@@ -30,13 +34,17 @@ def introspect_token(token: str) -> dict:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token introspection failed"
         ) 
+    ctoken = token.split(" ", 1)[1] if token.startswith("Bearer ") else token
     introspection_url = "https://auth.agentsphere.cloud/realms/agentsphere/protocol/openid-connect/token/introspect"
+
     client_id = "agentserver"
     client_secret = os.getenv("CLIENT_SECRET")
+
+    logger.debug(f"id {client_id} sec {client_secret}")
     response = requests.post(
         introspection_url,
         headers={"Content-Type":"application/x-www-form-urlencoded"},
-        data={"token": token, "client_id": client_id, "client_secret": client_secret}
+        data={"token": ctoken, "client_id": client_id, "client_secret": client_secret}
     )
     if response.status_code == 200:
         return response.json()
@@ -58,11 +66,11 @@ class User(BaseModel):
 
 
 def get_user_headers(
-    user_id: Optional[str] = Header(..., alias="X-OpenWebUI-User-Id"),
-    user_role: Optional[str] = Header(..., alias="X-OpenWebUI-User-Role"),
-    user_name: Optional[str] = Header(..., alias="X-OpenWebUI-User-Name"),
-    user_email: Optional[str] = Header(..., alias="X-OpenWebUI-User-Email"),
-    token: Optional[str] = Header(..., alias="Authorization")
+    user_id: Optional[str] = Header(None, alias="X-OpenWebUI-User-Id"),
+    user_role: Optional[str] = Header(None, alias="X-OpenWebUI-User-Role"),
+    user_name: Optional[str] = Header(None, alias="X-OpenWebUI-User-Name"),
+    user_email: Optional[str] = Header(None, alias="X-OpenWebUI-User-Email"),
+    token: Optional[str] = Header(None, alias="Authorization")
 ):
     return {
         "id": user_id,
