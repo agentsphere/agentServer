@@ -31,7 +31,7 @@ def introspect_token(token: str) -> dict:
             detail="Token introspection failed"
         ) 
     introspection_url = "https://auth.agentsphere.cloud/realms/agentsphere/protocol/openid-connect/token/introspect"
-    client_id = "toolserver"
+    client_id = "agentserver"
     client_secret = os.getenv("CLIENT_SECRET")
     response = requests.post(
         introspection_url,
