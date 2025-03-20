@@ -11,11 +11,11 @@ import logging
 logger = logging.getLogger(__name__)
 
 from dotenv import load_dotenv
-
+from app.llm import categorizeRequest, answerRequest, solveMediumRequest
 # Load variables from .env file
 load_dotenv()
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
@@ -58,11 +58,11 @@ def introspect_token(token: str) -> dict:
 from pydantic import BaseModel, Field
 
 class User(BaseModel):
-    id: str 
-    role: str 
-    username: str
-    mail: str
-    token: str 
+    id: Optional[str] 
+    role: Optional[str] 
+    username: Optional[str]
+    mail: Optional[str]
+    token: Optional[str]
 
 
 def get_user_headers(
@@ -100,6 +100,7 @@ class Message(BaseModel):
 class ChatRequest(BaseModel):
     model: str
     messages: List[Message]
+    stream: Optional[bool] = False
 
 @app.middleware("http")
 async def log_request_headers(request: Request, call_next):
@@ -123,14 +124,6 @@ class Model(BaseModel):
     digest: str
     details: ModelDetails
 
-class ChatMessage(BaseModel):
-    role: str
-    content: str
-
-class ChatRequest(BaseModel):
-    model: str
-    messages: List[ChatMessage]
-    stream: bool = False
 
 
 @app.get("/api/tags", response_model=Dict[str, List[Model]])
@@ -158,6 +151,28 @@ def list_models(token: str = Depends(validate_token)):
 def get_version(token: str = Depends(validate_token)):
     return {"version": "0.5.7"}
 
+from datetime import datetime, timezone, timedelta
+tz_offset = -8  # Offset in hours
+tzinfo = timezone(timedelta(hours=tz_offset))
+
+def getResponseObject(message: str):
+    return {
+        "model": "superman",
+        "created_at": f"{datetime.now(tzinfo)}",
+        "message": {
+            "role": "assistant",
+            "content": f"{message}"
+        },
+        "done": True,
+        "total_duration": 2,
+        "load_duration": 2,
+        "prompt_eval_count": 2,
+        "prompt_eval_duration": 2,
+        "eval_count": 2,
+        "eval_duration": 2
+    }
+
+
 
 @app.post("/api/chat")
 def handle_models(request: ChatRequest,token: str = Depends(get_user)):
@@ -168,21 +183,19 @@ def handle_models(request: ChatRequest,token: str = Depends(get_user)):
     #result_prepare = supermanPrepare.kickoff(inputs={"request": user_content})
 
     # Construct the response
-    return {
-        "model": "superman",
-        "created_at": "2023-12-07T09:32:18.757212583-08:00",
-        "message": {
-            "role": "assistant",
-            "content": "result_prepare"
-        },
-        "done": True,
-        "total_duration": 5191566416,
-        "load_duration": 2154458,
-        "prompt_eval_count": 26,
-        "prompt_eval_duration": 383809000,
-        "eval_count": 298,
-        "eval_duration": 4799921000
-    }
+
+    # categorize requesti
+    logger.debug(f"request {request}")
+    userRequest=request.messages[0].content
+    response = categorizeRequest(userRequest)
+
+    if response.lvl.value == "easy":
+        return getResponseObject(f"Not worthy of my time but hey: {answerRequest(userRequest)}")
+    elif response.lvl.value=="complex" or response.lvl.value == "medium":
+        logger.info("medium")
+        return getResponseObject(f"we are getting there. wanna give me something difficult? {solveMediumRequest(userRequest)}")
+
+    return getResponseObject("Not yet")
 
 
 PORT = int(os.getenv("PORT",8080))  # Define a default port
