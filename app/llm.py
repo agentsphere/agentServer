@@ -194,12 +194,31 @@ def solveMediumRequest(request: str):
     c = Agent.model_validate(json.loads(content))
     logger.info(f"Agent {c}")
 
+    # Gather information
+
     response = litellm.completion(
         model=model,
         response_format=Tasks,
         messages=[
             Message(role=Roles.SYSTEM.value, content=f"You are: {c.model_dump()}").model_dump(),
-            Message(role=Roles.USER.value, content=f'''Based on who you are, your background skills and tools. Analyse the request and break it down into multiple executable tasks, including tasks to test if the request is fullfilled, including steps to rollback to be able to revert if something goes wrong. Request:
+            Message(role=Roles.USER.value, content=f'''Based on who you are, your background skills and tools. Analyse the request and break it down into multiple executable tasks, including tasks to test if the request is fullfilled, including steps to rollback to be able to revert if something goes wrong. Always consider Best practices for the considered tool and workflow you use. Request:
+                    {request}
+            ''').model_dump()
+        ],
+    )
+    currentTasks= response.choices[0].message.content
+
+    response = litellm.completion(
+        model=model,
+        response_format=Tasks,
+        messages=[
+            Message(role=Roles.SYSTEM.value, content=f"You are: {c.model_dump()}").model_dump(),
+            Message(role=Roles.USER.value, content=f'''Context: 
+                    Original Request: {request}
+                    
+                    currentTasks: {currentTasks}
+                    
+                    Based on who you are, your background skills and tools. Analyse the currentTasks if they are executcable steps to solve the given original Request. Improve the given tasks. If the rollback is not needed leave it blank, make the tool queries concise and favour bash, sh, cli calls and mentiond the bash, sh, cli within the tool queries whenever used. Always consider Best practices for the considered tool and workflow you use (i.e. if your all dealing with code use git repo, never push to main use PRs and so on). Request:
                     {request}
             ''').model_dump()
         ],
