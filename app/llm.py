@@ -235,3 +235,30 @@ def solveMediumRequest(request: str):
 
         
     return content
+
+class Queries(BaseModel):
+    queries: Optional[list[str]] = Field(default = None, description="A list of query strings to be processed.")
+
+
+def getQueriesForDocument(doc):
+    response = litellm.completion(
+        model=MODEL,
+        response_format=Queries,
+        messages=[
+            Message(role=Roles.SYSTEM.value, content=f"You are a research query specialist").model_dump(),
+            Message(role=Roles.USER.value, content=f'''Given the following Documentation: 
+                
+                    {doc}
+                    
+                    ________________________________________
+
+                    Return a list of short search queries users and ai agents might use to search for the provided information in the documentation.
+            ''').model_dump()
+        ],
+    ) 
+    logger.debug(f"solve reponse {response}")
+    content = response.choices[0].message.content
+    logger.info(f"Tasks {content}")
+
+    queries = Queries.model_validate(json.loads(content))
+    return queries

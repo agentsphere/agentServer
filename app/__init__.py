@@ -1,3 +1,4 @@
 
 from app import logger  # Absolute import
-__all__ = ["logger"]
+from llm import llm
+__all__ = ["logger", "llm"]
