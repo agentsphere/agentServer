@@ -17,7 +17,7 @@ from app.queue import add_queue_for_chat, add_to_queue, remove_queue_for_chat
 logger = logging.getLogger(__name__)
 
 from dotenv import load_dotenv
-from app.llm import categorizeRequest, answerRequest, solveMediumRequest
+from app.llm import categorizeRequest, answerRequest, process_request, solveMediumRequest
 # Load variables from .env file
 load_dotenv()
 logging.basicConfig(
@@ -162,13 +162,13 @@ from datetime import datetime, timezone, timedelta
 tz_offset = -8  # Offset in hours
 tzinfo = timezone(timedelta(hours=tz_offset))
 
-def getResponseObject(message: str):
+def getResponseObject(message: str, finish: bool = False):
     return {
         "model": "superman",
         "created_at": f"{datetime.now(tzinfo)}",
         "message": {
             "role": "assistant",
-            "content": f"{message}"
+            "content": f""
         },
         "done": True,
         "total_duration": 2,
@@ -218,7 +218,7 @@ def stream_response(content, finish=False):
 
 
 @app.post("/api/chat")
-async def handle_models(request: ChatRequest,token: str = Depends(get_user)):
+async def handle_models(request: ChatRequest,user: str = Depends(get_user)):
     """
     Handles chat requests and streams responses to OpenWebUI.
     """
@@ -239,18 +239,15 @@ async def handle_models(request: ChatRequest,token: str = Depends(get_user)):
             Async generator to stre‚am messages to the client.
             """
             try:
-                # Send an initial message
-                #await queue.put("Categorizing request...")
-                
-                logger.info(f"Initial message queued for chat_id: {chat_id}")
                 userRequest=request.messages[0].content
-                asyncio.create_task(categorizeRequest(chat_id=chat_id,request=userRequest))
+                asyncio.create_task(process_request(user=user, chat_id=chat_id,request=userRequest))
 
                 while True:
                     # Wait for the next message from the queue
                     msg = await queue.get()
                     if msg == "[DONE]":
                         logger.info(f"Streaming completed for chat_id: {chat_id}")
+                        yield getResponseObject("", finish=True) + "\n"
                         break
                     yield stream_response(msg) + "\n"
 
@@ -263,15 +260,6 @@ async def handle_models(request: ChatRequest,token: str = Depends(get_user)):
         return StreamingResponse(event_stream(), media_type="application/json")
     else:
         logger.info("Not streaming")
-        #userRequest=request.messages[0].content
-        #response = categorizeRequest(userRequest)
-
-        #if response.lvl.value == "easy":
-        #    return getResponseObject(f"Not worthy of my time but hey: {answerRequest(userRequest)}")
-        #elif response.lvl.value=="complex" or response.lvl.value == "medium":
-        #    logger.info("medium")
-        #    return getResponseObject(f"we are getting there. wanna give me something difficult? {solveMediumRequest(userRequest)}")
-
         return getResponseObject("Only streaming requests are supported at this time.")
 
 

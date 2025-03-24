@@ -2,7 +2,7 @@ import asyncio
 from enum import Enum
 import json
 import os
-from typing import Annotated, Optional
+from typing import Annotated, Any, Dict, Optional
 import httpx
 import litellm
 from pydantic import BaseModel, Field, conint
@@ -10,6 +10,7 @@ import time  # Add this import at the top of the file
 
 import logging
 
+from app.models import User
 from app.queue import add_to_queue
 
 logger = logging.getLogger(__name__)
@@ -49,8 +50,7 @@ async def categorizeRequest(chat_id: str, request: str):
     start_time = time.time()
 
     # Line to measure
-    asyncio.create_task(add_to_queue(chat_id, f"Categorize Request {request}"))
-    await asyncio.sleep(0)  # This yields control back to the event loop
+    await asyncio.create_task(add_to_queue(chat_id, f"Let me check how complex your request is... \n\n"))
     # End timing
     end_time = time.time()
 
@@ -63,7 +63,7 @@ async def categorizeRequest(chat_id: str, request: str):
         response_format=CategoryResponse,
         messages=[
             Message(role=Roles.SYSTEM.value, content=f"Categorize response, according to format: {CategoryResponse.__doc__}").model_dump(),
-            Message(role=Roles.USER.value, content=f'''Categorize following request, easy: able to answer right away. medium: requires special background but can be done by one. complex: Team is required, multiple roles are involved.  if you are uncertain a seconds Agent will check to confirm your category:
+            Message(role=Roles.USER.value, content=f'''Categorize following request, easy: just gathering information, even multiple sources, text generation, able to answer right away after information gathering. medium: requires special background but can be done by one, more than just gathering information. complex: Team is required, multiple roles are involved.  if you are uncertain a seconds Agent will check to confirm your category:
                     {request}
             ''').model_dump()
         ],
@@ -74,33 +74,90 @@ async def categorizeRequest(chat_id: str, request: str):
     logger.debug(f"content {content}")
     c = CategoryResponse.model_validate(json.loads(content))
     logger.debug(f"c {c}")
-    await asyncio.create_task(add_to_queue(chat_id, f"Category: {c.lvl}"))
-    return True
+    await asyncio.create_task(add_to_queue(chat_id, f"Category: {c.lvl} \n\n "))
+    return c
 
-def answerRequest(request: str):
+class SolveTask(BaseModel):
+    tool_calls: list[str] = Field(description="List of Tool calls in the format tool(param1, param2)")
+    done: bool = Field(description="True if the task is done, False if not.")
+    message: str = Field(description="Message to the user")
+
+
+async def execute_tool(user, toolname: str, params: Dict[str, Any]):
+    """
+    Calls the tool execution API with the given parameters.
+    """
+    url = "http://127.0.0.1:8000/tools/execute"
+    headers = {"Content-Type": "application/json"}
+    if TOKEN:
+        headers["Authorization"] = f"Bearer {TOKEN}"
+
+    execution_request = ExecutionRequest(
+        toolname="bash sh",
+        params=params,
+        user=User(id=user.id, username=user.username)
+    )
+
+    logger.info(f"Sending execution request: {execution_request.model_dump_json()}")
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(url, data=execution_request.model_dump_json(), headers=headers)
+        response.raise_for_status()  # Raise an exception for HTTP errors
+        return response.json()
+    
+
+async def answerRequest(user, chat_id: str,request: str):
     """
     Categorizes a Request using LLM
     """
 
     logger.info(f"Answer Request {request}")
-    model="ollama_chat/qwen2.5-coder:32b"
+    await asyncio.create_task(add_to_queue(chat_id, f"Gathering information ... \n\n"))
 
-    response = litellm.completion(
-        model=model,
-        messages=[
-            Message(role=Roles.SYSTEM.value, content=f"Answer Request").model_dump(),
-            Message(role=Roles.USER.value, content=f'''Answer Request to the best of your knowledge
-                    {request}
-            ''').model_dump()
-        ],
+    model=MODEL
+    messages=[
+                Message(role=Roles.SYSTEM.value, content=f"Answer Request").model_dump(),
+                Message(role=Roles.USER.value, content=f'''Answer Request to the best of your knowledge
+                        {request}
 
-    )
-    logger.debug(f"respone {response}")
+                        you can use shell(command) to execute bash/shell commands to gather the needed information, use cli tools, call APIs
+                        Follow the syntax to call shell(command) strictly: example: shell(ls -l), shell(gcloud init), shell(echo "content" >> file)
+                        if you gather the needed information set done=true and provide a message to the user.
+                ''').model_dump()
+            ]
+    while True:
 
-    content = response.choices[0].message.content
-    logger.debug(f"content {content}")
+        response = await litellm.acompletion(
+            model=model,
+            response_format=SolveTask,
+            messages=messages,
 
-    return content
+        )
+        content = response.choices[0].message.content
+        logger.info(f"content {content}") # expecting tool call here
+        # await asyncio.create_task(add_to_queue(chat_id, f"Superman: Content {content} \n\n"))
+        parsedResp = SolveTask.model_validate(json.loads(content))
+        logger.info(f"parsedResp {parsedResp}") # expecting tool call here
+        if parsedResp.tool_calls:
+            for tool_call in parsedResp.tool_calls:
+
+                tool, params = tool_call.split("(", 1)
+                params = params[:-1]
+                await asyncio.create_task(add_to_queue(chat_id, f"Superman: Toolcall {params} \n\n"))
+                
+                res = await execute_tool(user, tool, params={"command":params})
+                # Log the message content before appending it to the messages list
+                message_content = f"Following tool execution has been executed with: Tool {tool} executed with command {params} response {res}"
+                logger.info(f"Appending message to messages list: {message_content}")
+
+                # Append the message to the messages list
+                messages.append(Message(role=Roles.USER.value, content=message_content).model_dump())
+             
+        if parsedResp.done:
+            await asyncio.create_task(add_to_queue(chat_id, f"Superman: {parsedResp.message} \n\n"))
+            break
+
+    return parsedResp.message
 
 
 
@@ -142,10 +199,6 @@ class Tasks(BaseModel):
 
     tasks: list[Task] = Field(description="A list of individual tasks to be executed.")
 
-class SolveTask(BaseModel):
-    tool_calls: list[str] = Field(description="List of Tool calls in the format tool(param1, param2)")
-
-
 
 class ToolSuggestionRequest(BaseModel):
     """Represents a request for tool suggestions based on a query and parameters."""
@@ -154,42 +207,100 @@ class ToolSuggestionRequest(BaseModel):
     queries: list[str]
 
 
-def solveTask(agent:Agent, task: Task):
+
+
+class ExecutionRequest(BaseModel):
+    """Represents a request to execute a tool with specific parameters."""
+    user: Optional[User] = None
+    toolname: Optional[str] = None
+    params: Optional[Dict[str, Any]] = None
+
+
+async def solveSubTask(user, agent:Agent, chat_id:str, task: Task):
    #load_tools
     logger.info(f"task {task}")
+
+    await asyncio.create_task(add_to_queue(chat_id, f"{agent.role}: Solving subtask {task.description} \n\n"))
     with httpx.Client() as client:
         data = ToolSuggestionRequest(queries=task.tool_queries)
         url = 'http://127.0.0.1:8000/tools/suggestions'  # Example URL that echoes the posted data
         logger.info(f"Sending execution request: {data.model_dump_json()}")
 
-        response = client.post(url, data=data.model_dump_json(),headers={"Content-Type": "application/json", "Authorization": f"Bearer {TOKEN}"})  # ✅ Correct async call)  # ✅ Correct async call
+        responseTools = client.post(url, data=data.model_dump_json(),headers={"Content-Type": "application/json", "Authorization": f"Bearer {TOKEN}"})  # ✅ Correct async call)  # ✅ Correct async call
+    logger.info(f"responseTools {responseTools}")
+
+    messages=[
+                Message(role=Roles.SYSTEM.value, content=f"You are: {agent.model_dump()}").model_dump(),
+                Message(role=Roles.USER.value, content=f'''Shell is available 
+                        shell("command") # execute bash/shell commands to create edit files, use cli tools, call APIs
+                        whenever you want use the shell use "shell('command')" in the tool calls. you can execute multiple shell commands. Just use multiple entries in the tool_calls list.
+                        As long as the task is not done you can continue to execute tools. If you are done set done=true and provide a message to the user.
+                        Context Informtion: {task.context}
+                        Based on who you are, your background skills and tools, solve the current task:
+                        {task.description}
+                ''').model_dump()
+            ]
+    
+    while True:
+
+        content = await litellm.acompletion(
+            model=MODEL, 
+            response_format=SolveTask,
+            messages=messages,
+        )
+
+        response = content.choices[0].message.content
+        logger.info(f"content {response}") # expecting tool call here
+        parsedResp = SolveTask.model_validate(json.loads(response))
         
-    response = litellm.completion(
-        model=MODEL,
+        if parsedResp.tool_calls:
+            for tool_call in parsedResp.tool_calls:
+
+                tool, params = tool_call.split("(", 1)
+                params = params[:-1]
+                await asyncio.create_task(add_to_queue(chat_id, f"{agent.role}: Toolcall {params} \n\n"))
+                
+                res = await execute_tool(user, tool, params={"command":params})
+                messages.append(Message(role=Roles.SYSTEM.value, content=f"Tool {tool} executed with params {params} res {res}").model_dump())
+        if parsedResp.done:
+            await asyncio.create_task(add_to_queue(chat_id, f"{agent.role}: Subtask finished {parsedResp.message} \n\n"))
+            break
+
+
+    """verify = await litellm.acompletion(
+        model=MODEL, 
         response_format=SolveTask,
         messages=[
             Message(role=Roles.SYSTEM.value, content=f"You are: {agent.model_dump()}").model_dump(),
             Message(role=Roles.USER.value, content=f'''Tools available 
-                    {response.json} 
+                    shell("command") # execute bash/shell commands to create edit files, use cli tools, call APIs
 
                     Context Informtion: {task.context}
-                    Based on who you are, your background skills and tools, solve the current task:
+                    Based on who you are, your background skills and tools, test if the current task was solved:
                     {task.description}
+
+                    How to test: {task.test}
+
+                    If how to test doesn't provide any meaningful information on how to test if the task was done you you don't find any way to test return with done=true (same as if you have tested succesfully)
             ''').model_dump()
         ],
     )
-    content = response.choices[0].message.content
-    logger.info(f"content {content}") # expecting tool call here
+    verify_content = verify.choices[0].message.content
+    logger.info(f"content {verify}") 
+    await asyncio.create_task(add_to_queue(chat_id, f"{agent.role}: Test {verify_content} \n\n"))"""
+    return content
 
  
 
-def solveMediumRequest(request: str):
+async def solveMediumRequest(user, chat_id: str, request: str):
     """Solves a Request Medium complexity"""
 
     logger.info(f"solveMediumRequest {request}")
     model="ollama_chat/qwen2.5-coder:32b"
 
-    response = litellm.completion(
+    await asyncio.create_task(add_to_queue(chat_id, f"Finding best candidate to solve your medium complex request ... \n\n"))
+
+    response = await litellm.acompletion(
         model=model,
         response_format=Agent,
         messages=[
@@ -206,28 +317,49 @@ def solveMediumRequest(request: str):
     logger.debug(f"content {content}")
     c = Agent.model_validate(json.loads(content))
     logger.info(f"Agent {c}")
+    await asyncio.create_task(add_to_queue(chat_id, f"Starting Agent with role {c.role} with background '{c.background}' ... \n\n"))
+
 
     # Gather information
 
-    response = litellm.completion(
+    
+    requestImproved = await litellm.acompletion(
+        model=model,
+        messages=[
+            Message(role=Roles.SYSTEM.value, content=f"You are: {c.model_dump()}").model_dump(),
+            Message(role=Roles.USER.value, content=f'''
+                    Be conscise and clear in your following request.
+                    Based on who you are, your background skills and tools. Analyse the request and make it more concrete add information which might be necessary so that an intern could solve the request. Add information like best practices to follow when using tools and solving tasks to fulfull the request. Request:
+                    Don't provide too much information, just the necessary information to solve the request.
+                    {request}
+            ''').model_dump()
+        ],
+    )
+    requestImprovedTxt= requestImproved.choices[0].message.content
+    await asyncio.create_task(add_to_queue(chat_id, f"{c.role}: I have refined your original request for further processing: '{requestImprovedTxt}' ... \n\n"))
+
+
+    await asyncio.create_task(add_to_queue(chat_id, f"{c.role}: Breaking down your request into executable subtasks ... \n\n"))
+   
+    response = await litellm.acompletion(
         model=model,
         response_format=Tasks,
         messages=[
             Message(role=Roles.SYSTEM.value, content=f"You are: {c.model_dump()}").model_dump(),
             Message(role=Roles.USER.value, content=f'''Based on who you are, your background skills and tools. Analyse the request and break it down into multiple executable tasks, including tasks to test if the request is fullfilled, including steps to rollback to be able to revert if something goes wrong. Always consider Best practices for the considered tool and workflow you use. Request:
-                    {request}
+                    {requestImprovedTxt}
             ''').model_dump()
         ],
     )
     currentTasks= response.choices[0].message.content
 
-    response = litellm.completion(
+    response = await litellm.acompletion(
         model=model,
         response_format=Tasks,
         messages=[
             Message(role=Roles.SYSTEM.value, content=f"You are: {c.model_dump()}").model_dump(),
             Message(role=Roles.USER.value, content=f'''Context: 
-                    Original Request: {request}
+                    Original Request: {requestImprovedTxt}
                     
                     currentTasks: {currentTasks}
                     
@@ -237,16 +369,20 @@ def solveMediumRequest(request: str):
         ],
     )
 
+
     logger.debug(f"solve reponse {response}")
     content = response.choices[0].message.content
     logger.info(f"Tasks {content}")
 
     tasks = Tasks.model_validate(json.loads(content))
-    for task in tasks.tasks:
-        solveTask(agent=c, task=task)
-      
+    taskString = "\n\n".join([f"* {task.description}" for task in tasks.tasks]) + "\n\n ... "
+    await asyncio.create_task(add_to_queue(chat_id, f"{c.role}: Tasks: \n\n {taskString}"))
 
-        
+    # Creating jira Subtasks, toDO
+
+    for task in tasks.tasks:
+        await solveSubTask(user, agent=c,chat_id=chat_id, task=task)
+      
     return content
 
 class Queries(BaseModel):
@@ -276,3 +412,21 @@ def getQueriesForDocument(doc):
 
     queries = Queries.model_validate(json.loads(content))
     return queries
+
+
+async def process_request(user, chat_id: str, request: str):
+    """
+    Processes a request from a client.
+    """
+    
+    logger.info(f"Processing request {request} for client_id {chat_id}")
+    category = await categorizeRequest(chat_id, request)
+
+    if category:
+        if category.lvl == DifficultyLevel.EASY:
+            await answerRequest(user, chat_id, request)
+        elif category.lvl == DifficultyLevel.MEDIUM or category.lvl == DifficultyLevel.COMPLEX:
+            await solveMediumRequest(user, chat_id,request)
+    await asyncio.create_task(add_to_queue(chat_id, "[DONE]"))
+    return "fin"
+    
