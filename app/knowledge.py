@@ -13,12 +13,13 @@ from selenium.webdriver.support import expected_conditions as EC
 from llm import getQueriesForDocument
 
 driver = webdriver.Chrome()
+import mongomock
+# Use an in-memory MongoDB mock
+client = mongomock.MongoClient()
+db = client["knowledgedb"]
+collection = db["knowledge"]
 
 DOCLIMIT=6000
-# Wait until document.readyState is 'complete'
-WebDriverWait(driver, 30).until(
-    lambda driver: driver.execute_script('return document.readyState') == 'complete'
-)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,40 +31,21 @@ def emb_text(text):
     response = ollama.embeddings(model="mxbai-embed-large", prompt=text)
     return response["embedding"]
 
-client = MilvusClient("milvus_demo.db")
+vector = MilvusClient("milvus_demo.db")
+if vector.has_collection(collection_name="knowledge"):
+    logger.info("Dropping existing collection:knowledge")
+    vector.drop_collection(collection_name="knowledge")
 
-if client.has_collection(collection_name="knowledge"):
-    logger.info("Dropping existing collection: knowledge")
-    client.drop_collection(collection_name="knowledge")
-
-logger.info("Creating new collection: knowledge")
-client.create_collection(
-    collection_name="knowldge",
-    auto_id=True,
-    dimension=1024,
-)
-
-
-
+if not vector.has_collection(collection_name="knowledge"):
+    logger.info("creating new collection: knowledge")
+    vector.create_collection(
+        collection_name="knowledge",
+        auto_id=True,
+        dimension=1024,
+    )
 
 import requests
 from bs4 import BeautifulSoup
-#from sentence_transformers import SentenceTransformer
-#from vectordb import Memory
-
-
-def search_vector_db(query, threshold=0.8):
-    query_embedding = emb_text(query)
-    res = client.search(
-            collection_name="tool_collection",
-            data=[query_embedding],
-            limit=2,
-        )
-    filtered_results = [
-        hit for hit in res[0] if hit.get("distance") >= threshold
-    ]
-    logger.info(filtered_results)
-    return filtered_results
 
 
 def perform_web_search(query):
@@ -192,86 +174,96 @@ def getDocsFromHTML(html):
         return split(main)
    
 
-def extract_text_from_url(url):
-
-    docs = getDocsFromHTML(getPageWithSelenium(url))
-    for doc in docs:
-        queries = getQueriesForDocument(doc)
-        logger.info(f"{queries}")
-    # Extract main content based on HTML structure
-    #paragraphs = soup.find_all('p')
-    #text_content = ' '.join([para.get_text() for para in paragraphs])
-    #return text_content
-    return "fin"
-
-
-
-if __name__ == "__main__":
-    try:
-        url= "https://ai.pydantic.dev/"
-        logger.info(extract_text_from_url(url))
-    except KeyboardInterrupt:
-        logging.info("Server shutdown requested. Exiting cleanly.")
-
-
-
-
-
-#def store_chunks_in_vectordb(chunks):
-#    for chunk in chunks:
-#        embedding = embedding_model.encode(chunk, convert_to_tensor=True)
-#        memory.add({'text': chunk, 'embedding': embedding})
-
-def fetch_knowledge(query):
-    # Step 1: Search vectorDB
-    result = search_vector_db(query)
-    if result:
-        return result
-
-    # Step 2: Perform web search
-    urls = perform_web_search(query)
-
-    # Step 3: Extract and process information from websites
-    for url in urls:
-        text = extract_text_from_url(url)
-        chunks = chunk_text(text)
-        #store_chunks_in_vectordb(chunks)
-
-    # Step 4: Retry vectorDB search after updating it
-    result = search_vector_db(query)
-    return result
-
-# Example usage
-#query = "Python web scraping libraries"
-#knowledge = fetch_knowledge(query)
-#print(knowledge)
-
-
-
-toolQueries = [
-    {"query": "lets setup a postgres", "tool": "bash sh"},
-    {"query": "lets create a PR", "tool": "bash sh"},
-    {"query": "insert into postgres", "tool": "bash sh"},
-    {"query": "commit in repo", "tool": "bash sh"}
-]
 
 def addQuery(query):
     """Adds a query to the Milvus vector database with proper error handling."""
     try:
-        if not query or not query.get("query") or not query.get("tool"):
+        if not query or not query.get("query") or not query.get("doc_id"):
             logger.warning("Invalid query data provided. Skipping insertion.")
             return
 
         logger.info(f"Generating embedding for query: {query.get('query')}")
-        vector = emb_text(query.get("query"))
+        emb = emb_text(query.get("query"))
 
-        logger.info(f"Inserting query into collection: {query.get('query')} -> {query.get('tool')}")
-        client.insert(
-            collection_name="tool_collection",
-            data=[{"vector": vector, "text": query.get("query"), "tool": query.get("tool")}]
+        logger.info(f"Inserting query into collection: {query.get('query')} -> {query.get('doc_id')}")
+        vector.insert(
+            collection_name="knowledge",
+            data=[{"vector": emb, "query": query.get("query"), "doc_id": query.get("doc_id")}]
         )
-        logger.info(f"Successfully added query: {query.get('query')} with tool: {query.get('tool')}")
+        logger.info(f"Successfully added query: {query.get('query')} with doc: {query.get('doc_id')}")
     except Exception as e:
         logger.error(f"Error inserting query into Milvus: {e}")
 
-#[addQuery(t) for t in toolQueries]
+
+def load_from_url(url):
+
+    docs = getDocsFromHTML(getPageWithSelenium(url))
+    
+    for doc in docs:
+        queries = getQueriesForDocument(doc)
+
+        
+        logger.info(f"{queries}")
+        id = collection.insert_one({"doc": f"{doc}"}).inserted_id
+        logger.info(f"id {id} with doc {doc[0:200]}")
+        for q in queries.queries:
+            addQuery({"query": str(q), "doc_id": str(id)})
+
+    return "fin"
+
+
+def getKnowledge(query):
+
+    resultsList = vector.search(
+            collection_name="knowledge",
+            data=[emb_text(query)],
+            limit=10,
+            output_fields=["query", "doc_id"],
+        )
+
+    logger.info(f"{resultsList}")
+    knowledge = f"""For query: {query} 
+
+I have following information available: 
+"""
+    idsToGet=[]
+    for results in resultsList:
+        for result in results:
+            logger.debug(f"Search result: {result}")
+            if result.get("distance") > 0.7:
+
+                idsToGet.append(result.get("entity").get("doc_id"))
+    idsUnique = list(set(idsToGet))
+    logger.info(f" id  {idsUnique}")
+    res = collection.find({"_id": {"$in": idsUnique}})
+    for re in res:
+        logger.info(re.get("doc"))
+        knowledge += re.get("doc")
+
+    #logger.info(res)
+    #logger.info(doc)
+    #knowledge += doc.get("doc")
+   
+    logger.info(knowledge)
+
+                
+
+
+if __name__ == "__main__":
+    try:
+
+        #id = collection.insert_one({"doc": "asdsaddoc}"}).inserted_id
+
+
+        #res = collection.find({"_id": {"$in": [id]}})
+        #for re in res:
+        #    logger.info(re.get("doc"))
+        #logger.info(res)
+        url= "https://ai.pydantic.dev/"
+        logger.info(load_from_url(url))
+
+        getKnowledge("use logfire in PydanticAI")
+
+    except KeyboardInterrupt:
+        logging.info("Server shutdown requested. Exiting cleanly.")
+

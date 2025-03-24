@@ -253,12 +253,13 @@ def getQueriesForDocument(doc):
                     ________________________________________
 
                     Return a list of short search queries users and ai agents might use to search for the provided information in the documentation.
+                    Each search query should contain 8-15 words
             ''').model_dump()
         ],
     ) 
     logger.debug(f"solve reponse {response}")
     content = response.choices[0].message.content
-    logger.info(f"Tasks {content}")
+    logger.info(f" {content}")
 
     queries = Queries.model_validate(json.loads(content))
     return queries
