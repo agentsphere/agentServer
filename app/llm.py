@@ -1,4 +1,4 @@
-
+import asyncio
 from enum import Enum
 import json
 import os
@@ -6,14 +6,17 @@ from typing import Annotated, Optional
 import httpx
 import litellm
 from pydantic import BaseModel, Field, conint
+import time  # Add this import at the top of the file
 
 import logging
+
+from app.queue import add_to_queue
 
 logger = logging.getLogger(__name__)
 TOKEN=os.getenv("TOKEN")
 
 MODEL="ollama_chat/qwen2.5-coder:32b"
-
+#MODEL="gpt-4o-mini"
 class DifficultyLevel(str, Enum):
     """Enum representing different levels of difficulty."""
     EASY = "easy"
@@ -36,33 +39,43 @@ class Roles(str, Enum):
     SYSTEM = "system"
     USER = "user"
 
-def categorizeRequest(request: str):
+async def categorizeRequest(chat_id: str, request: str):
     """
     Categorizes a Request using LLM
     """
-
     logger.info(f"Categorize Request {request}")
-    model="ollama_chat/qwen2.5-coder:32b"
 
-    response = litellm.completion(
+    # Start timing
+    start_time = time.time()
+
+    # Line to measure
+    asyncio.create_task(add_to_queue(chat_id, f"Categorize Request {request}"))
+    await asyncio.sleep(0)  # This yields control back to the event loop
+    # End timing
+    end_time = time.time()
+
+    # Log the duration
+    logger.info(f"Time taken for add_to_queue: {end_time - start_time:.6f} seconds")
+
+    model = MODEL
+    response = await litellm.acompletion(
         model=model,
-        response_format = CategoryResponse, 
+        response_format=CategoryResponse,
         messages=[
             Message(role=Roles.SYSTEM.value, content=f"Categorize response, according to format: {CategoryResponse.__doc__}").model_dump(),
             Message(role=Roles.USER.value, content=f'''Categorize following request, easy: able to answer right away. medium: requires special background but can be done by one. complex: Team is required, multiple roles are involved.  if you are uncertain a seconds Agent will check to confirm your category:
                     {request}
             ''').model_dump()
         ],
-
     )
     logger.debug(f"respone {response}")
 
     content = response.choices[0].message.content
     logger.debug(f"content {content}")
     c = CategoryResponse.model_validate(json.loads(content))
-
     logger.debug(f"c {c}")
-    return c
+    await asyncio.create_task(add_to_queue(chat_id, f"Category: {c.lvl}"))
+    return True
 
 def answerRequest(request: str):
     """

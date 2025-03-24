@@ -3,11 +3,17 @@ import asyncio
 import datetime
 import os
 from typing import Dict, List, Optional
+import uuid
 
 from fastapi import Depends, FastAPI, Request, HTTPException,status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import httpx
 import logging
+
+from sse_starlette import EventSourceResponse
+
+from app.queue import add_queue_for_chat, add_to_queue, remove_queue_for_chat
 logger = logging.getLogger(__name__)
 
 from dotenv import load_dotenv
@@ -86,6 +92,7 @@ def get_user(user_headers: dict = Depends(get_user_headers)):
     return User(**user_headers)
 
 def validate_token(token_header: dict = Depends(get_user_headers)):
+    logger.debug(f"token_header {token_header}")
     introspect_token(token_header.get("token", None))
     return
 
@@ -172,30 +179,100 @@ def getResponseObject(message: str):
         "eval_duration": 2
     }
 
+class CallbackData(BaseModel):
+    data: str
+
+@app.post("/callback/{chat_id}")
+async def subagent_callback(chat_id: str, data: CallbackData):
+    add_to_queue(chat_id, data.data)
+    return {"status": "ok"}
+
+import json
+
+def stream_response(content, finish=False):
+    """
+    Formats a message for SSE compatible with Open WebUI.
+
+    Parameters:
+    - content (str): The content of the message.
+    - message_id (str): A unique identifier for the message.
+    - finish_reason (str, optional): Reason for finishing the message stream. Use None for intermediate messages and "stop" for the final message.
+
+    Returns:
+    - str: A formatted SSE data string.
+    """
+    sse_data = {
+        "model": "superman:latest",
+        "created_at": f"{datetime.now(tzinfo)}",
+        "message": {
+            "role": "assistant",
+            "content": f"{content}",
+            "images": None
+        },
+        "done": finish
+    }
+    
+    return json.dumps(sse_data)
+
+
 
 
 @app.post("/api/chat")
-def handle_models(request: ChatRequest,token: str = Depends(get_user)):
-    # Extract the user's message content±
-    #user_content = request.messages[0].content
+async def handle_models(request: ChatRequest,token: str = Depends(get_user)):
+    """
+    Handles chat requests and streams responses to OpenWebUI.
+    """
+    logger.debug(f"Incoming request: {request}")
 
-    # Process the request using the supermanPrepare.kickoff function
-    #result_prepare = supermanPrepare.kickoff(inputs={"request": user_content})
+    if request.stream:
+        # Generate a unique chat ID
+        chat_id = str(uuid.uuid4())
+        logger.debug(f"Generated chat_id: {chat_id}")
 
-    # Construct the response
+        # Create a new asyncio.Queue for streaming messages
+        queue = asyncio.Queue()
+        add_queue_for_chat(chat_id, queue)
+        logger.info(f"Queue created for chat_id: {chat_id}")
 
-    # categorize requesti
-    logger.debug(f"request {request}")
-    userRequest=request.messages[0].content
-    response = categorizeRequest(userRequest)
+        async def event_stream():
+            """
+            Async generator to stre‚am messages to the client.
+            """
+            try:
+                # Send an initial message
+                #await queue.put("Categorizing request...")
+                
+                logger.info(f"Initial message queued for chat_id: {chat_id}")
+                userRequest=request.messages[0].content
+                asyncio.create_task(categorizeRequest(chat_id=chat_id,request=userRequest))
 
-    if response.lvl.value == "easy":
-        return getResponseObject(f"Not worthy of my time but hey: {answerRequest(userRequest)}")
-    elif response.lvl.value=="complex" or response.lvl.value == "medium":
-        logger.info("medium")
-        return getResponseObject(f"we are getting there. wanna give me something difficult? {solveMediumRequest(userRequest)}")
+                while True:
+                    # Wait for the next message from the queue
+                    msg = await queue.get()
+                    if msg == "[DONE]":
+                        logger.info(f"Streaming completed for chat_id: {chat_id}")
+                        break
+                    yield stream_response(msg) + "\n"
 
-    return getResponseObject("Not yet")
+            finally:
+                # Cleanup: Remove the queue after streaming is done
+                logger.info(f"Cleaning up queue for chat_id: {chat_id}")
+                remove_queue_for_chat(chat_id)
+
+        # Return the streaming response
+        return StreamingResponse(event_stream(), media_type="application/json")
+    else:
+        logger.info("Not streaming")
+        #userRequest=request.messages[0].content
+        #response = categorizeRequest(userRequest)
+
+        #if response.lvl.value == "easy":
+        #    return getResponseObject(f"Not worthy of my time but hey: {answerRequest(userRequest)}")
+        #elif response.lvl.value=="complex" or response.lvl.value == "medium":
+        #    logger.info("medium")
+        #    return getResponseObject(f"we are getting there. wanna give me something difficult? {solveMediumRequest(userRequest)}")
+
+        return getResponseObject("Only streaming requests are supported at this time.")
 
 
 PORT = int(os.getenv("PORT",8080))  # Define a default port
